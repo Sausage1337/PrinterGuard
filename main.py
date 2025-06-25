@@ -1,7 +1,7 @@
 import sys
 import sqlite3
 import hashlib
-import analytecs
+import analytics
 from datetime import datetime
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
