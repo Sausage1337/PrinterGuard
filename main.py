@@ -1,14 +1,16 @@
 import sys
 import sqlite3
 import hashlib
+import analytecs
 from datetime import datetime
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QListWidget, QInputDialog, QMessageBox, QLabel, QDialog, QFormLayout,
-    QLineEdit, QSpinBox, QDialogButtonBox, QCheckBox, QTextEdit, QComboBox, QListWidgetItem
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
+    QPushButton, QListWidget, QLabel, QDialog, QFormLayout, QLineEdit, QSpinBox,
+    QDialogButtonBox, QComboBox, QTextEdit, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog
 )
 from PySide6.QtGui import QColor
 import autoupdate
+
 
 DB_FILE = "office.db"
 
@@ -18,7 +20,6 @@ def hash_password(password):
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Пользователи
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         login TEXT UNIQUE NOT NULL,
@@ -29,7 +30,6 @@ def init_db():
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users (login, password, role) VALUES (?, ?, ?)",
                   ("admin", hash_password("admin"), "admin"))
-    # Кабинеты, принтеры, история списаний
     c.execute('''CREATE TABLE IF NOT EXISTS cabinets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL
@@ -55,7 +55,6 @@ def init_db():
         username TEXT,
         FOREIGN KEY (printer_id) REFERENCES printers(id)
     )''')
-    # Склад
     c.execute('''CREATE TABLE IF NOT EXISTS storage (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         model TEXT NOT NULL,
@@ -72,17 +71,6 @@ def init_db():
         from_place TEXT,
         to_place TEXT
     )''')
-    # Миграции для новых полей
-    c.execute("PRAGMA table_info(writeoff_history)")
-    columns = [row[1] for row in c.fetchall()]
-    if 'username' not in columns:
-        c.execute("ALTER TABLE writeoff_history ADD COLUMN username TEXT")
-    c.execute("PRAGMA table_info(printers)")
-    columns = [row[1] for row in c.fetchall()]
-    if 'min_cartridge_amount' not in columns:
-        c.execute("ALTER TABLE printers ADD COLUMN min_cartridge_amount INTEGER DEFAULT 0")
-    if 'min_drum_amount' not in columns:
-        c.execute("ALTER TABLE printers ADD COLUMN min_drum_amount INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -104,74 +92,709 @@ class LoginDialog(QDialog):
     def get_credentials(self):
         return self.login_edit.text(), self.pass_edit.text()
 
-class UserManagementDialog(QDialog):
-    def __init__(self, parent=None):
+class UserDialog(QDialog):
+    def __init__(self, login="", role="operator", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Управление пользователями")
-        self.resize(350, 250)
-        layout = QVBoxLayout(self)
-        self.user_list = QListWidget()
-        self.load_users()
-        layout.addWidget(self.user_list)
+        self.setWindowTitle("Пользователь")
+        layout = QFormLayout(self)
+        self.login_edit = QLineEdit(login)
+        self.pass_edit = QLineEdit()
+        self.pass_edit.setEchoMode(QLineEdit.Password)
+        self.role_box = QComboBox()
+        self.role_box.addItems(["admin", "operator", "viewer"])
+        self.role_box.setCurrentText(role)
+        layout.addRow("Логин:", self.login_edit)
+        layout.addRow("Пароль:", self.pass_edit)
+        layout.addRow("Роль:", self.role_box)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-        btn_add = QPushButton("Добавить пользователя")
-        btn_del = QPushButton("Удалить пользователя")
-        btn_add.clicked.connect(self.add_user)
-        btn_del.clicked.connect(self.delete_user)
-        layout.addWidget(btn_add)
-        layout.addWidget(btn_del)
-        self.setLayout(layout)
+    def get_data(self):
+        return self.login_edit.text(), self.pass_edit.text(), self.role_box.currentText()
 
-    def load_users(self):
-        self.user_list.clear()
+class MainWindow(QMainWindow):
+    def __init__(self, user_role, username, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Учёт принтеров и расходников")
+        self.resize(1280, 750)
+        self.user_role = user_role
+        self.username = username
+
+        # --- Боковое меню ---
+        self.menu_widget = QWidget()
+        menu_layout = QVBoxLayout(self.menu_widget)
+        menu_layout.setSpacing(12)
+        self.btn_overview = QPushButton("Обзор")
+        self.btn_cabinets = QPushButton("Кабинеты")
+        self.btn_printers = QPushButton("Принтеры")
+        self.btn_storage = QPushButton("Склад")
+        self.btn_history = QPushButton("История")
+        self.btn_analytics = QPushButton("Аналитика")
+        self.btn_users = QPushButton("Пользователи")
+        self.btn_update = QPushButton("Обновление")
+        self.btn_exit = QPushButton("Выход")
+
+        for btn in [
+            self.btn_overview, self.btn_cabinets, self.btn_printers, self.btn_storage,
+            self.btn_history, self.btn_analytics, self.btn_users, self.btn_update, self.btn_exit]:
+            btn.setMinimumHeight(36)
+            menu_layout.addWidget(btn)
+        menu_layout.addStretch(1)
+
+        # --- Центральные вкладки ---
+        self.tabs = QTabWidget()
+        self.tab_overview = QWidget()
+        self.tab_cabinets = QWidget()
+        self.tab_printers = QWidget()
+        self.tab_storage = QWidget()
+        self.tab_history = QWidget()
+        self.tab_analytics = QWidget()
+        self.tab_users = QWidget()
+
+        self.tabs.addTab(self.tab_overview, "Обзор")
+        self.tabs.addTab(self.tab_cabinets, "Кабинеты")
+        self.tabs.addTab(self.tab_printers, "Принтеры")
+        self.tabs.addTab(self.tab_storage, "Склад")
+        self.tabs.addTab(self.tab_history, "История")
+        self.tabs.addTab(self.tab_analytics, "Аналитика")
+        self.tabs.addTab(self.tab_users, "Пользователи")
+
+        # --- Основной компоновщик ---
+        central_widget = QWidget()
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.addWidget(self.menu_widget, 0)
+        main_layout.addWidget(self.tabs, 1)
+        self.setCentralWidget(central_widget)
+
+        # --- Обработка навигации по меню ---
+        self.btn_overview.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_overview))
+        self.btn_cabinets.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_cabinets))
+        self.btn_printers.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_printers))
+        self.btn_storage.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_storage))
+        self.btn_history.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_history))
+        self.btn_analytics.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_analytics))
+        self.btn_users.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_users))
+        self.btn_update.clicked.connect(lambda: autoupdate.check_and_update_gui(self))
+        self.btn_exit.clicked.connect(self.close)
+
+        # --- Ограничения по ролям ---
+        if self.user_role != "admin":
+            self.btn_users.setEnabled(False)
+
+        # --- Заполнение вкладок ---
+        self.setup_overview_tab()
+        self.setup_cabinets_tab()
+        self.setup_printers_tab()
+        self.setup_storage_tab()
+        self.setup_history_tab()
+        self.setup_analytics_tab()
+        self.setup_users_tab()
+
+        self.tabs.setCurrentWidget(self.tab_overview)
+
+    # ========== OVERVIEW ==========
+    def setup_overview_tab(self):
+        layout = QVBoxLayout(self.tab_overview)
+        self.lbl_hello = QLabel(f"<b>Здравствуйте, {self.username}!</b>")
+        self.lbl_hello.setStyleSheet("font-size:18px;margin:10px;")
+        self.lbl_summary = QLabel("")
+        self.lbl_summary.setStyleSheet("font-size:15px;margin:10px;")
+        layout.addWidget(self.lbl_hello)
+        layout.addWidget(self.lbl_summary)
+        layout.addStretch(1)
+        self.refresh_overview()
+
+    def refresh_overview(self):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT login, role FROM users ORDER BY login")
-        for login, role in c.fetchall():
-            self.user_list.addItem(f"{login} ({role})")
+        c.execute("SELECT COUNT(*) FROM cabinets")
+        cab_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM printers")
+        prn_count = c.fetchone()[0]
+        c.execute("SELECT SUM(amount) FROM storage WHERE type='cartridge'")
+        cart_sum = c.fetchone()[0] or 0
+        c.execute("SELECT SUM(amount) FROM storage WHERE type='drum'")
+        drum_sum = c.fetchone()[0] or 0
+        conn.close()
+        text = (
+            f"Кабинетов: <b>{cab_count}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Принтеров: <b>{prn_count}</b><br>"
+            f"Картриджей на складе: <b>{cart_sum}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Драмов на складе: <b>{drum_sum}</b>"
+        )
+        self.lbl_summary.setText(text)
+
+    # ========== CABINETS ==========
+    def setup_cabinets_tab(self):
+        layout = QVBoxLayout(self.tab_cabinets)
+        h = QHBoxLayout()
+        self.cabinet_list = QListWidget()
+        self.cabinet_list.setMaximumWidth(300)
+        self.cabinet_list.itemClicked.connect(self.show_cabinet_printers)
+        h.addWidget(self.cabinet_list)
+        self.cabinet_printer_table = QTableWidget(0, 5)
+        self.cabinet_printer_table.setHorizontalHeaderLabels(["Принтер", "Картридж", "Драм", "Картр.", "Драм"])
+        self.cabinet_printer_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        h.addWidget(self.cabinet_printer_table, 2)
+        layout.addLayout(h)
+
+        btns = QHBoxLayout()
+        self.btn_add_cabinet = QPushButton("Добавить кабинет")
+        self.btn_del_cabinet = QPushButton("Удалить кабинет")
+        btns.addWidget(self.btn_add_cabinet)
+        btns.addWidget(self.btn_del_cabinet)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+
+        self.btn_add_cabinet.clicked.connect(self.add_cabinet)
+        self.btn_del_cabinet.clicked.connect(self.delete_cabinet)
+        self.refresh_cabinets()
+
+    def refresh_cabinets(self):
+        self.cabinet_list.clear()
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM cabinets ORDER BY name")
+        self.cabinets = c.fetchall()
+        for cabid, name in self.cabinets:
+            self.cabinet_list.addItem(f"{name} (ID: {cabid})")
+        conn.close()
+        self.cabinet_printer_table.setRowCount(0)
+
+    def add_cabinet(self):
+        name, ok = QInputDialog.getText(self, "Добавить кабинет", "Название кабинета:")
+        if ok and name.strip():
+            try:
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute("INSERT INTO cabinets (name) VALUES (?)", (name.strip(),))
+                conn.commit()
+                conn.close()
+                self.refresh_cabinets()
+                self.refresh_overview()
+            except sqlite3.IntegrityError:
+                QMessageBox.warning(self, "Ошибка", "Кабинет с таким названием уже существует!")
+
+    def delete_cabinet(self):
+        idx = self.cabinet_list.currentRow()
+        if idx < 0 or idx >= len(self.cabinets):
+            return
+        cabid, name = self.cabinets[idx]
+        reply = QMessageBox.question(self, "Удалить кабинет",
+                                     f"Удалить кабинет '{name}' и все его принтеры?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("DELETE FROM printers WHERE cabinet_id=?", (cabid,))
+            c.execute("DELETE FROM cabinets WHERE id=?", (cabid,))
+            conn.commit()
+            conn.close()
+            self.refresh_cabinets()
+            self.refresh_overview()
+
+    def show_cabinet_printers(self, item):
+        cabid = int(item.text().split("ID:")[1].strip(") "))
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT name, cartridge, drum, cartridge_amount, drum_amount FROM printers WHERE cabinet_id=?", (cabid,))
+        printers = c.fetchall()
+        self.cabinet_printer_table.setRowCount(len(printers))
+        for i, (name, cart, drum, cart_amt, drum_amt) in enumerate(printers):
+            self.cabinet_printer_table.setItem(i, 0, QTableWidgetItem(name))
+            self.cabinet_printer_table.setItem(i, 1, QTableWidgetItem(cart or "-"))
+            self.cabinet_printer_table.setItem(i, 2, QTableWidgetItem(drum or "-"))
+            self.cabinet_printer_table.setItem(i, 3, QTableWidgetItem(str(cart_amt)))
+            self.cabinet_printer_table.setItem(i, 4, QTableWidgetItem(str(drum_amt)))
+        conn.close()
+
+    # ========== PRINTERS ==========
+    def setup_printers_tab(self):
+        layout = QVBoxLayout(self.tab_printers)
+        self.printer_table = QTableWidget(0, 8)
+        self.printer_table.setHorizontalHeaderLabels([
+            "Кабинет", "Принтер", "Картридж", "Драм", "Картр.", "Драм", "Мин. Картр.", "Мин. Драм"
+        ])
+        self.printer_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.printer_table)
+
+        btns = QHBoxLayout()
+        self.btn_add_printer = QPushButton("Добавить принтер")
+        self.btn_edit_printer = QPushButton("Редактировать")
+        self.btn_del_printer = QPushButton("Удалить")
+        self.btn_writeoff = QPushButton("Списать расходник")
+        btns.addWidget(self.btn_add_printer)
+        btns.addWidget(self.btn_edit_printer)
+        btns.addWidget(self.btn_del_printer)
+        btns.addWidget(self.btn_writeoff)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+
+        self.btn_add_printer.clicked.connect(self.add_printer)
+        self.btn_edit_printer.clicked.connect(self.edit_printer)
+        self.btn_del_printer.clicked.connect(self.delete_printer)
+        self.btn_writeoff.clicked.connect(self.writeoff_printer)
+        self.refresh_printers()
+
+    def refresh_printers(self):
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''SELECT cabinets.name, printers.id, printers.name, printers.cartridge, printers.drum,
+                    printers.cartridge_amount, printers.drum_amount, printers.min_cartridge_amount, printers.min_drum_amount
+                     FROM printers
+                     LEFT JOIN cabinets ON printers.cabinet_id = cabinets.id
+                     ORDER BY cabinets.name, printers.name''')
+        rows = c.fetchall()
+        self.printer_table.setRowCount(len(rows))
+        self.printers = []
+        for i, (cab, pid, prn, cart, drum, cart_amt, drum_amt, min_cart, min_drum) in enumerate(rows):
+            self.printers.append((pid, cab, prn, cart, drum, cart_amt, drum_amt, min_cart, min_drum))
+            self.printer_table.setItem(i, 0, QTableWidgetItem(cab or "-"))
+            self.printer_table.setItem(i, 1, QTableWidgetItem(prn))
+            self.printer_table.setItem(i, 2, QTableWidgetItem(cart or "-"))
+            self.printer_table.setItem(i, 3, QTableWidgetItem(drum or "-"))
+            self.printer_table.setItem(i, 4, QTableWidgetItem(str(cart_amt)))
+            self.printer_table.setItem(i, 5, QTableWidgetItem(str(drum_amt)))
+            self.printer_table.setItem(i, 6, QTableWidgetItem(str(min_cart)))
+            self.printer_table.setItem(i, 7, QTableWidgetItem(str(min_drum)))
+        conn.close()
+
+    def add_printer(self):
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM cabinets ORDER BY name")
+        cabs = c.fetchall()
+        conn.close()
+        if not cabs:
+            QMessageBox.warning(self, "Ошибка", "Нет ни одного кабинета.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Новый принтер")
+        form = QFormLayout(dlg)
+        cb_cab = QComboBox()
+        for cid, name in cabs:
+            cb_cab.addItem(name, cid)
+        name_edit = QLineEdit()
+        cart_edit = QLineEdit()
+        drum_edit = QLineEdit()
+        cart_amt = QSpinBox(); cart_amt.setMaximum(1000)
+        drum_amt = QSpinBox(); drum_amt.setMaximum(1000)
+        min_cart = QSpinBox(); min_cart.setMaximum(100)
+        min_drum = QSpinBox(); min_drum.setMaximum(100)
+        form.addRow("Кабинет:", cb_cab)
+        form.addRow("Название:", name_edit)
+        form.addRow("Модель картриджа:", cart_edit)
+        form.addRow("Модель драма:", drum_edit)
+        form.addRow("Кол-во картриджей:", cart_amt)
+        form.addRow("Кол-во драмов:", drum_amt)
+        form.addRow("Мин. картриджей:", min_cart)
+        form.addRow("Мин. драмов:", min_drum)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec():
+            cabid = cb_cab.currentData()
+            name = name_edit.text().strip()
+            cart = cart_edit.text().strip()
+            drum = drum_edit.text().strip()
+            ca = cart_amt.value()
+            da = drum_amt.value()
+            mca = min_cart.value()
+            mda = min_drum.value()
+            if not name:
+                QMessageBox.warning(self, "Ошибка", "Название принтера не может быть пустым.")
+                return
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('''INSERT INTO printers (cabinet_id, name, cartridge, drum, cartridge_amount, drum_amount, min_cartridge_amount, min_drum_amount)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                         (cabid, name, cart, drum, ca, da, mca, mda))
+            conn.commit()
+            conn.close()
+            self.refresh_printers()
+            self.refresh_overview()
+
+    def edit_printer(self):
+        idx = self.printer_table.currentRow()
+        if idx < 0 or idx >= len(self.printers):
+            return
+        pid, cab, name, cart, drum, cart_amt, drum_amt, min_cart, min_drum = self.printers[idx]
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM cabinets ORDER BY name")
+        cabs = c.fetchall()
+        conn.close()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Редактировать принтер")
+        form = QFormLayout(dlg)
+        cb_cab = QComboBox()
+        for cid, cname in cabs:
+            cb_cab.addItem(cname, cid)
+            if cname == cab:
+                cb_cab.setCurrentText(cab)
+        name_edit = QLineEdit(name)
+        cart_edit = QLineEdit(cart)
+        drum_edit = QLineEdit(drum)
+        cart_amt_spin = QSpinBox(); cart_amt_spin.setValue(cart_amt); cart_amt_spin.setMaximum(1000)
+        drum_amt_spin = QSpinBox(); drum_amt_spin.setValue(drum_amt); drum_amt_spin.setMaximum(1000)
+        min_cart_spin = QSpinBox(); min_cart_spin.setValue(min_cart); min_cart_spin.setMaximum(100)
+        min_drum_spin = QSpinBox(); min_drum_spin.setValue(min_drum); min_drum_spin.setMaximum(100)
+        form.addRow("Кабинет:", cb_cab)
+        form.addRow("Название:", name_edit)
+        form.addRow("Модель картриджа:", cart_edit)
+        form.addRow("Модель драма:", drum_edit)
+        form.addRow("Кол-во картриджей:", cart_amt_spin)
+        form.addRow("Кол-во драмов:", drum_amt_spin)
+        form.addRow("Мин. картриджей:", min_cart_spin)
+        form.addRow("Мин. драмов:", min_drum_spin)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec():
+            cabid = cb_cab.currentData()
+            new_name = name_edit.text().strip()
+            new_cart = cart_edit.text().strip()
+            new_drum = drum_edit.text().strip()
+            ca = cart_amt_spin.value()
+            da = drum_amt_spin.value()
+            mca = min_cart_spin.value()
+            mda = min_drum_spin.value()
+            if not new_name:
+                QMessageBox.warning(self, "Ошибка", "Название принтера не может быть пустым.")
+                return
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('''UPDATE printers SET cabinet_id=?, name=?, cartridge=?, drum=?, cartridge_amount=?, drum_amount=?, min_cartridge_amount=?, min_drum_amount=?
+                         WHERE id=?''',
+                         (cabid, new_name, new_cart, new_drum, ca, da, mca, mda, pid))
+            conn.commit()
+            conn.close()
+            self.refresh_printers()
+            self.refresh_overview()
+
+    def delete_printer(self):
+        idx = self.printer_table.currentRow()
+        if idx < 0 or idx >= len(self.printers):
+            return
+        pid, cab, name, *_ = self.printers[idx]
+        reply = QMessageBox.question(self, "Удалить принтер", f"Удалить принтер '{name}'?", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("DELETE FROM printers WHERE id=?", (pid,))
+            conn.commit()
+            conn.close()
+            self.refresh_printers()
+            self.refresh_overview()
+
+    def writeoff_printer(self):
+        idx = self.printer_table.currentRow()
+        if idx < 0 or idx >= len(self.printers):
+            return
+        pid, cab, name, cart, drum, cart_amt, drum_amt, *_ = self.printers[idx]
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Списать расходник")
+        form = QFormLayout(dlg)
+        spin_cart = QSpinBox(); spin_cart.setMaximum(cart_amt); spin_cart.setValue(0)
+        spin_drum = QSpinBox(); spin_drum.setMaximum(drum_amt); spin_drum.setValue(0)
+        form.addRow(f"Списать картриджей (макс {cart_amt}):", spin_cart)
+        form.addRow(f"Списать драмов (макс {drum_amt}):", spin_drum)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec():
+            wc = spin_cart.value()
+            wd = spin_drum.value()
+            if wc == 0 and wd == 0:
+                return
+            if wc > cart_amt or wd > drum_amt:
+                QMessageBox.warning(self, "Ошибка", "Нельзя списать больше, чем есть.")
+                return
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("UPDATE printers SET cartridge_amount=cartridge_amount-?, drum_amount=drum_amount-? WHERE id=?",
+                      (wc, wd, pid))
+            c.execute("INSERT INTO writeoff_history (printer_id, writeoff_cartridge, writeoff_drum, datetime, username) VALUES (?, ?, ?, ?, ?)",
+                      (pid, wc, wd, now, self.username))
+            conn.commit()
+            conn.close()
+            self.refresh_printers()
+            self.refresh_overview()
+
+    # ========== STORAGE ==========
+    def setup_storage_tab(self):
+        layout = QVBoxLayout(self.tab_storage)
+        self.storage_table = QTableWidget(0, 3)
+        self.storage_table.setHorizontalHeaderLabels(["Модель", "Тип", "Количество"])
+        self.storage_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.storage_table)
+        btns = QHBoxLayout()
+        self.btn_add_storage = QPushButton("Поступление")
+        self.btn_give_storage = QPushButton("Выдать на принтер")
+        btns.addWidget(self.btn_add_storage)
+        btns.addWidget(self.btn_give_storage)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+        self.btn_add_storage.clicked.connect(self.add_storage)
+        self.btn_give_storage.clicked.connect(self.give_storage)
+        self.refresh_storage()
+
+    def refresh_storage(self):
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT model, type, amount FROM storage ORDER BY type, model")
+        rows = c.fetchall()
+        self.storage_table.setRowCount(len(rows))
+        self.storage = []
+        for i, (model, t, amt) in enumerate(rows):
+            self.storage.append((model, t, amt))
+            self.storage_table.setItem(i, 0, QTableWidgetItem(model))
+            self.storage_table.setItem(i, 1, QTableWidgetItem(t))
+            self.storage_table.setItem(i, 2, QTableWidgetItem(str(amt)))
+        conn.close()
+        self.refresh_overview()
+
+    def add_storage(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Поступление на склад")
+        form = QFormLayout(dlg)
+        model = QLineEdit()
+        t = QComboBox(); t.addItems(["cartridge", "drum"])
+        amt = QSpinBox(); amt.setMinimum(1); amt.setMaximum(1000)
+        form.addRow("Модель:", model)
+        form.addRow("Тип:", t)
+        form.addRow("Количество:", amt)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec():
+            m = model.text().strip()
+            ty = t.currentText()
+            amount = amt.value()
+            if not m:
+                QMessageBox.warning(self, "Ошибка", "Модель не может быть пустой.")
+                return
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT id FROM storage WHERE model=? AND type=?", (m, ty))
+            row = c.fetchone()
+            if row:
+                c.execute("UPDATE storage SET amount=amount+? WHERE id=?", (amount, row[0]))
+            else:
+                c.execute("INSERT INTO storage (model, type, amount) VALUES (?, ?, ?)", (m, ty, amount))
+            c.execute("INSERT INTO storage_transfer_history (datetime, username, model, type, amount, from_place, to_place) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.username, m, ty, amount, "внешние поставки", "склад"))
+            conn.commit()
+            conn.close()
+            self.refresh_storage()
+
+    def give_storage(self):
+        idx = self.storage_table.currentRow()
+        if idx < 0 or idx >= len(self.storage):
+            return
+        model, t, amt = self.storage[idx]
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        if t == "cartridge":
+            c.execute("SELECT id, name FROM printers WHERE cartridge=?", (model,))
+        else:
+            c.execute("SELECT id, name FROM printers WHERE drum=?", (model,))
+        prns = c.fetchall()
+        conn.close()
+        if not prns:
+            QMessageBox.warning(self, "Ошибка", "Нет принтеров для выдачи данного расходника.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Выдать на принтер")
+        form = QFormLayout(dlg)
+        cb = QComboBox()
+        for pid, pname in prns:
+            cb.addItem(pname, pid)
+        give_amt = QSpinBox(); give_amt.setMinimum(1); give_amt.setMaximum(amt)
+        form.addRow("Принтер:", cb)
+        form.addRow("Количество:", give_amt)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        form.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec():
+            pid = cb.currentData()
+            a = give_amt.value()
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("UPDATE storage SET amount=amount-? WHERE model=? AND type=?", (a, model, t))
+            if t == "cartridge":
+                c.execute("UPDATE printers SET cartridge_amount=cartridge_amount+? WHERE id=?", (a, pid))
+            else:
+                c.execute("UPDATE printers SET drum_amount=drum_amount+? WHERE id=?", (a, pid))
+            c.execute("SELECT name FROM printers WHERE id=?", (pid,))
+            prn_name = c.fetchone()[0]
+            c.execute("INSERT INTO storage_transfer_history (datetime, username, model, type, amount, from_place, to_place) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.username, model, t, a, "склад", prn_name))
+            conn.commit()
+            conn.close()
+            self.refresh_storage()
+            self.refresh_printers()
+
+    # ========== HISTORY ==========
+    def setup_history_tab(self):
+        layout = QVBoxLayout(self.tab_history)
+        self.history_text = QTextEdit()
+        self.history_text.setReadOnly(True)
+        layout.addWidget(self.history_text)
+        self.btn_refresh_history = QPushButton("Обновить историю")
+        layout.addWidget(self.btn_refresh_history)
+        self.btn_refresh_history.clicked.connect(self.refresh_history)
+        self.refresh_history()
+
+    def refresh_history(self):
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT datetime, username, model, type, amount, from_place, to_place FROM storage_transfer_history ORDER BY datetime DESC")
+        rows = c.fetchall()
+        s = ""
+        for dt, user, model, t, amt, ffrom, to in rows:
+            s += f"{dt}: {model} [{t}], {amt} шт., {ffrom} → {to} (Оператор: {user})\n"
+        self.history_text.setText(s or "История пуста")
+        conn.close()
+
+    # ========== ANALYTICS ==========
+    def setup_analytics_tab(self):
+        layout = QVBoxLayout(self.tab_analytics)
+        self.btn_plot_cart = QPushButton("График расхода картриджей")
+        self.btn_plot_drum = QPushButton("График расхода драмов")
+        self.btn_top5_cart = QPushButton("Топ-5 картриджей")
+        self.btn_top5_drum = QPushButton("Топ-5 драмов")
+        self.btn_forecast = QPushButton("Прогноз по модели")
+        self.btn_export = QPushButton("Экспорт в Excel и PNG")
+        layout.addWidget(self.btn_plot_cart)
+        layout.addWidget(self.btn_plot_drum)
+        layout.addWidget(self.btn_top5_cart)
+        layout.addWidget(self.btn_top5_drum)
+        layout.addWidget(self.btn_forecast)
+        layout.addWidget(self.btn_export)
+        layout.addStretch(1)
+
+        self.btn_plot_cart.clicked.connect(analytics.plot_cartridge_usage)
+        self.btn_plot_drum.clicked.connect(analytics.plot_drum_usage)
+        self.btn_top5_cart.clicked.connect(analytics.top5_cartridge_models)
+        self.btn_top5_drum.clicked.connect(analytics.top5_drum_models)
+        self.btn_export.clicked.connect(self.export_analytics)
+        self.btn_forecast.clicked.connect(self.forecast_dialog)
+
+    def export_analytics(self):
+        analytics.export_cartridge_usage_to_excel()
+        analytics.export_drum_usage_to_excel()
+        analytics.save_cartridge_usage_plot()
+        analytics.save_drum_usage_plot()
+        QMessageBox.information(self, "Экспорт", "Экспорт выполнен. Смотрите файлы в папке программы.")
+
+    def forecast_dialog(self):
+        model, ok = QInputDialog.getText(self, "Прогноз", "Введите модель и тип (через запятую):\nнапример\nCanon 725, cartridge")
+        if ok and "," in model:
+            m, t = model.split(",", 1)
+            t = t.strip()
+            m = m.strip()
+            if t not in ("cartridge", "drum"):
+                QMessageBox.warning(self, "Ошибка", "Тип должен быть cartridge или drum")
+                return
+            analytics.forecast_next_month(m, t)
+
+    # ========== USERS ==========
+    def setup_users_tab(self):
+        layout = QVBoxLayout(self.tab_users)
+        self.users_list = QListWidget()
+        layout.addWidget(self.users_list)
+        btns = QHBoxLayout()
+        self.btn_add_user = QPushButton("Добавить")
+        self.btn_edit_user = QPushButton("Изменить")
+        self.btn_del_user = QPushButton("Удалить")
+        btns.addWidget(self.btn_add_user)
+        btns.addWidget(self.btn_edit_user)
+        btns.addWidget(self.btn_del_user)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+        self.btn_add_user.clicked.connect(self.add_user)
+        self.btn_edit_user.clicked.connect(self.edit_user)
+        self.btn_del_user.clicked.connect(self.delete_user)
+        self.refresh_users()
+
+    def refresh_users(self):
+        self.users_list.clear()
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT login, role FROM users")
+        users = c.fetchall()
+        for login, role in users:
+            self.users_list.addItem(f"{login} ({role})")
         conn.close()
 
     def add_user(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить пользователя")
-        form = QFormLayout(dlg)
-        login = QLineEdit()
-        password = QLineEdit()
-        password.setEchoMode(QLineEdit.Password)
-        role = QComboBox()
-        role.addItems(["admin", "operator", "viewer"])
-        form.addRow("Логин:", login)
-        form.addRow("Пароль:", password)
-        form.addRow("Роль:", role)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        form.addWidget(buttons)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
+        dlg = UserDialog(parent=self)
         if dlg.exec():
-            l = login.text()
-            p = password.text()
-            r = role.currentText()
-            if not l or not p:
+            login, password, role = dlg.get_data()
+            if not login or not password:
                 QMessageBox.warning(self, "Ошибка", "Укажите логин и пароль")
                 return
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             try:
                 c.execute("INSERT INTO users (login, password, role) VALUES (?, ?, ?)",
-                          (l, hash_password(p), r))
+                          (login, hash_password(password), role))
                 conn.commit()
-                self.load_users()
+                self.refresh_users()
             except sqlite3.IntegrityError:
                 QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует.")
             conn.close()
 
-    def delete_user(self):
-        idx = self.user_list.currentRow()
+    def edit_user(self):
+        idx = self.users_list.currentRow()
         if idx < 0:
             return
-        login = self.user_list.item(idx).text().split(" ")[0]
+        login = self.users_list.item(idx).text().split(" ")[0]
         if login == "admin":
-            QMessageBox.warning(self, "Ошибка", "Нельзя удалить главного администратора.")
+            QMessageBox.warning(self, "Ошибка", "Главного администратора нельзя редактировать.")
+            return
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT role FROM users WHERE login=?", (login,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return
+        dlg = UserDialog(login, row[0], self)
+        if dlg.exec():
+            new_login, password, role = dlg.get_data()
+            if not new_login:
+                QMessageBox.warning(self, "Ошибка", "Укажите логин")
+                return
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            if password:
+                c.execute("UPDATE users SET login=?, password=?, role=? WHERE login=?",
+                          (new_login, hash_password(password), role, login))
+            else:
+                c.execute("UPDATE users SET login=?, role=? WHERE login=?",
+                          (new_login, role, login))
+            conn.commit()
+            conn.close()
+            self.refresh_users()
+
+    def delete_user(self):
+        idx = self.users_list.currentRow()
+        if idx < 0:
+            return
+        login = self.users_list.item(idx).text().split(" ")[0]
+        if login == "admin":
+            QMessageBox.warning(self, "Ошибка", "Главного администратора нельзя удалить.")
             return
         reply = QMessageBox.question(self, "Удалить пользователя", f"Удалить пользователя '{login}'?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
@@ -180,672 +803,11 @@ class UserManagementDialog(QDialog):
             c.execute("DELETE FROM users WHERE login=?", (login,))
             conn.commit()
             conn.close()
-            self.load_users()
-
-class PrinterEditDialog(QDialog):
-    def __init__(self, name="", cartridge="", cartridge_amount=0, drum="", drum_amount=0,
-                 min_cart_amt=0, min_drum_amt=0, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Редактировать принтер")
-        layout = QFormLayout(self)
-
-        self.name_edit = QLineEdit(name)
-        self.cart_edit = QLineEdit(cartridge)
-        self.cart_amt = QSpinBox()
-        self.cart_amt.setMinimum(0)
-        self.cart_amt.setValue(cartridge_amount)
-        self.drum_edit = QLineEdit(drum)
-        self.drum_amt = QSpinBox()
-        self.drum_amt.setMinimum(0)
-        self.drum_amt.setValue(drum_amount)
-        self.min_cart_amt = QSpinBox()
-        self.min_cart_amt.setMinimum(0)
-        self.min_cart_amt.setValue(min_cart_amt)
-        self.min_drum_amt = QSpinBox()
-        self.min_drum_amt.setMinimum(0)
-        self.min_drum_amt.setValue(min_drum_amt)
-
-        layout.addRow("Название принтера:", self.name_edit)
-        layout.addRow("Модель картриджа:", self.cart_edit)
-        layout.addRow("Количество картриджей:", self.cart_amt)
-        layout.addRow("Мин. остаток картриджей для напоминания:", self.min_cart_amt)
-        layout.addRow("Модель драма:", self.drum_edit)
-        layout.addRow("Количество драмов:", self.drum_amt)
-        layout.addRow("Мин. остаток драмов для напоминания:", self.min_drum_amt)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def get_data(self):
-        return (
-            self.name_edit.text(),
-            self.cart_edit.text(),
-            self.cart_amt.value(),
-            self.drum_edit.text(),
-            self.drum_amt.value(),
-            self.min_cart_amt.value(),
-            self.min_drum_amt.value()
-        )
-
-class WriteOffDialog(QDialog):
-    def __init__(self, cartridge_amount, drum_amount, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Списать картридж/драм")
-        layout = QFormLayout(self)
-
-        self.cb_cart = QCheckBox("Списать картриджи")
-        self.cb_drum = QCheckBox("Списать драм")
-        self.spin_cart = QSpinBox()
-        self.spin_cart.setMinimum(1)
-        self.spin_cart.setMaximum(cartridge_amount)
-        self.spin_cart.setValue(1)
-        self.spin_cart.setEnabled(False)
-        self.spin_drum = QSpinBox()
-        self.spin_drum.setMinimum(1)
-        self.spin_drum.setMaximum(drum_amount)
-        self.spin_drum.setValue(1)
-        self.spin_drum.setEnabled(False)
-
-        self.cb_cart.toggled.connect(lambda v: self.spin_cart.setEnabled(v))
-        self.cb_drum.toggled.connect(lambda v: self.spin_drum.setEnabled(v))
-
-        layout.addRow(self.cb_cart, self.spin_cart)
-        layout.addRow(self.cb_drum, self.spin_drum)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        if cartridge_amount == 0:
-            self.cb_cart.setEnabled(False)
-            self.spin_cart.setEnabled(False)
-        if drum_amount == 0:
-            self.cb_drum.setEnabled(False)
-            self.spin_drum.setEnabled(False)
-
-        self.setLayout(layout)
-
-    def get_writeoff(self):
-        cart_count = self.spin_cart.value() if self.cb_cart.isChecked() else 0
-        drum_count = self.spin_drum.value() if self.cb_drum.isChecked() else 0
-        return cart_count, drum_count
-
-class WriteoffHistoryDialog(QDialog):
-    def __init__(self, printer_id, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("История списаний")
-        self.resize(400, 300)
-        layout = QVBoxLayout(self)
-        self.text = QTextEdit()
-        self.text.setReadOnly(True)
-        layout.addWidget(self.text)
-        self.load_history(printer_id)
-
-    def load_history(self, printer_id):
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("""
-            SELECT datetime, writeoff_cartridge, writeoff_drum, username
-            FROM writeoff_history
-            WHERE printer_id=?
-            ORDER BY datetime DESC
-        """, (printer_id,))
-        rows = c.fetchall()
-        conn.close()
-        if not rows:
-            self.text.setText("История списаний пуста.")
-            return
-        s = ""
-        for dt, wc, wd, who in rows:
-            parts = []
-            if wc:
-                parts.append(f"Картриджей: {wc}")
-            if wd:
-                parts.append(f"Драмов: {wd}")
-            who_str = f" (Списал: {who})" if who else ""
-            s += f"{dt}: " + ", ".join(parts) + who_str + "\n"
-        self.text.setText(s)
-
-class StorageDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Склад расходников")
-        self.resize(550, 350)
-        self.table = QListWidget()
-        self.reload_storage()
-        btn_add = QPushButton("Пополнить склад")
-        btn_transfer = QPushButton("Выдать на принтер")
-        btn_return = QPushButton("Вернуть на склад")
-        btn_history = QPushButton("История перемещений")
-
-        btn_add.clicked.connect(self.add_to_storage)
-        btn_transfer.clicked.connect(self.transfer_to_printer)
-        btn_return.clicked.connect(self.return_to_storage)
-        btn_history.clicked.connect(self.show_history)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Остатки на складе:"))
-        layout.addWidget(self.table)
-        h = QHBoxLayout()
-        h.addWidget(btn_add)
-        h.addWidget(btn_transfer)
-        h.addWidget(btn_return)
-        h.addWidget(btn_history)
-        layout.addLayout(h)
-        self.setLayout(layout)
-
-    def reload_storage(self):
-        self.table.clear()
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT model, type, amount FROM storage ORDER BY type, model")
-        for model, t, amt in c.fetchall():
-            self.table.addItem(f"{model} [{t}] — {amt} шт.")
-        conn.close()
-
-    def add_to_storage(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Пополнить склад")
-        f = QFormLayout(dlg)
-        model = QLineEdit()
-        t = QComboBox()
-        t.addItems(["cartridge", "drum"])
-        amount = QSpinBox()
-        amount.setMinimum(1)
-        f.addRow("Модель:", model)
-        f.addRow("Тип:", t)
-        f.addRow("Количество:", amount)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        f.addWidget(btns)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        if dlg.exec():
-            m = model.text()
-            ty = t.currentText()
-            amt = amount.value()
-            if not m:
-                QMessageBox.warning(self, "Ошибка", "Укажите модель!")
-                return
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("SELECT id FROM storage WHERE model=? AND type=?", (m, ty))
-            row = c.fetchone()
-            if row:
-                c.execute("UPDATE storage SET amount=amount+? WHERE id=?", (amt, row[0]))
-            else:
-                c.execute("INSERT INTO storage (model, type, amount) VALUES (?, ?, ?)", (m, ty, amt))
-            # Лог в историю
-            c.execute("INSERT INTO storage_transfer_history (datetime, username, model, type, amount, from_place, to_place) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.parent().username, m, ty, amt, "внешние поставки", "склад"))
-            conn.commit()
-            conn.close()
-            self.reload_storage()
-
-    def transfer_to_printer(self):
-        idx = self.table.currentRow()
-        if idx < 0:
-            QMessageBox.information(self, "Склад", "Выберите модель для выдачи.")
-            return
-        item = self.table.item(idx).text()
-        parts = item.split(" — ")[0].split(" [")
-        model = parts[0].strip()
-        t = parts[1][:-1]
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT amount FROM storage WHERE model=? AND type=?", (model, t))
-        amount_on_storage = c.fetchone()[0]
-        # Список принтеров, куда можно выдать такой расходник
-        if t == "cartridge":
-            c.execute("SELECT id, name FROM printers WHERE cartridge=?", (model,))
-        else:
-            c.execute("SELECT id, name FROM printers WHERE drum=?", (model,))
-        prns = c.fetchall()
-        conn.close()
-        if not prns:
-            QMessageBox.warning(self, "Нет принтеров", f"Нет принтеров, использующих {model} [{t}]")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Выдать на принтер")
-        f = QFormLayout(dlg)
-        cb = QComboBox()
-        for pid, n in prns:
-            cb.addItem(n, pid)
-        amt = QSpinBox()
-        amt.setMaximum(amount_on_storage)
-        amt.setMinimum(1)
-        amt.setValue(1)
-        f.addRow("Принтер:", cb)
-        f.addRow("Количество:", amt)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        f.addWidget(btns)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        if dlg.exec():
-            pid = cb.currentData()
-            give_amt = amt.value()
-            # Перемещаем со склада на принтер
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("UPDATE storage SET amount=amount-? WHERE model=? AND type=?", (give_amt, model, t))
-            if t == "cartridge":
-                c.execute("UPDATE printers SET cartridge_amount=cartridge_amount+? WHERE id=?", (give_amt, pid))
-            else:
-                c.execute("UPDATE printers SET drum_amount=drum_amount+? WHERE id=?", (give_amt, pid))
-            # История
-            c.execute("SELECT name FROM printers WHERE id=?", (pid,))
-            printer_name = c.fetchone()[0]
-            c.execute("INSERT INTO storage_transfer_history (datetime, username, model, type, amount, from_place, to_place) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.parent().username, model, t, give_amt, "склад", printer_name))
-            conn.commit()
-            conn.close()
-            self.reload_storage()
-
-    def return_to_storage(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Вернуть на склад")
-        f = QFormLayout(dlg)
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT id, name, cartridge, cartridge_amount, drum, drum_amount FROM printers")
-        all_printers = c.fetchall()
-        prn_cb = QComboBox()
-        for pid, name, cart, cart_amt, drum, drum_amt in all_printers:
-            if cart and cart_amt > 0:
-                prn_cb.addItem(f"{name}: {cart} (картриджи, {cart_amt} шт.)", (pid, "cartridge", cart, cart_amt))
-            if drum and drum_amt > 0:
-                prn_cb.addItem(f"{name}: {drum} (драмы, {drum_amt} шт.)", (pid, "drum", drum, drum_amt))
-        conn.close()
-        if prn_cb.count() == 0:
-            QMessageBox.information(self, "Нет расходников", "Нет расходников для возврата на склад.")
-            return
-        amt = QSpinBox()
-        amt.setMinimum(1)
-        amt.setMaximum(prn_cb.currentData()[3])
-        amt.setValue(1)
-        def update_amt(idx):
-            amt.setMaximum(prn_cb.itemData(idx)[3])
-        prn_cb.currentIndexChanged.connect(update_amt)
-        f.addRow("Принтер/расходник:", prn_cb)
-        f.addRow("Количество для возврата:", amt)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        f.addWidget(btns)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        if dlg.exec():
-            pid, t, model, max_amt = prn_cb.currentData()
-            amount = amt.value()
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            # Уменьшаем у принтера, увеличиваем на складе
-            if t == "cartridge":
-                c.execute("UPDATE printers SET cartridge_amount=cartridge_amount-? WHERE id=?", (amount, pid))
-            else:
-                c.execute("UPDATE printers SET drum_amount=drum_amount-? WHERE id=?", (amount, pid))
-            c.execute("SELECT id FROM storage WHERE model=? AND type=?", (model, t))
-            storage_row = c.fetchone()
-            if storage_row:
-                c.execute("UPDATE storage SET amount=amount+? WHERE id=?", (amount, storage_row[0]))
-            else:
-                c.execute("INSERT INTO storage (model, type, amount) VALUES (?, ?, ?)", (model, t, amount))
-            # История
-            c.execute("SELECT name FROM printers WHERE id=?", (pid,))
-            printer_name = c.fetchone()[0]
-            c.execute("INSERT INTO storage_transfer_history (datetime, username, model, type, amount, from_place, to_place) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                      (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.parent().username, model, t, amount, printer_name, "склад"))
-            conn.commit()
-            conn.close()
-            self.reload_storage()
-
-    def show_history(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("История перемещений склада")
-        dlg.resize(600,350)
-        text = QTextEdit()
-        text.setReadOnly(True)
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(text)
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT datetime, username, model, type, amount, from_place, to_place FROM storage_transfer_history ORDER BY datetime DESC")
-        rows = c.fetchall()
-        conn.close()
-        s = ""
-        for dt, user, model, t, amt, ffrom, to in rows:
-            s += f"{dt}: {model} [{t}], {amt} шт., {ffrom} → {to} (Оператор: {user})\n"
-        text.setText(s or "История пуста")
-        dlg.exec()
-
-class MainWindow(QWidget):
-    def __init__(self, user_role, username, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Учёт кабинетов и принтеров (PySide6)")
-        self.resize(920, 400)
-        self.cabinets = []
-        self.printers = []
-        self.user_role = user_role
-        self.username = username
-
-        main_layout = QHBoxLayout(self)
-        left_layout = QVBoxLayout()
-        right_layout = QVBoxLayout()
-
-        self.cabinet_list = QListWidget()
-        self.cabinet_list.currentRowChanged.connect(self.on_cabinet_selected)
-        self.printer_list = QListWidget()
-        self.printer_list.currentRowChanged.connect(self.on_printer_selected)
-        self.printer_list.itemDoubleClicked.connect(self.edit_printer)
-
-        self.btn_add_cab = QPushButton("Добавить кабинет")
-        self.btn_del_cab = QPushButton("Удалить кабинет")
-        self.btn_add_prn = QPushButton("Добавить принтер")
-        self.btn_del_prn = QPushButton("Удалить принтер")
-        self.btn_edit_prn = QPushButton("Редактировать принтер")
-        self.btn_writeoff = QPushButton("Списать картридж/драм")
-        self.btn_history = QPushButton("История списаний")
-        self.btn_users = QPushButton("Пользователи")
-        self.btn_storage = QPushButton("Склад расходников")
-        self.btn_update = QPushButton("Обновление")
-        self.btn_update.clicked.connect(self.do_update)
-
-        self.btn_add_cab.clicked.connect(self.add_cabinet)
-        self.btn_del_cab.clicked.connect(self.delete_cabinet)
-        self.btn_add_prn.clicked.connect(self.add_printer)
-        self.btn_del_prn.clicked.connect(self.delete_printer)
-        self.btn_edit_prn.clicked.connect(self.edit_printer)
-        self.btn_writeoff.clicked.connect(self.writeoff_items)
-        self.btn_history.clicked.connect(self.show_writeoff_history)
-        self.btn_users.clicked.connect(self.manage_users)
-        self.btn_storage.clicked.connect(self.open_storage)
-
-        self.info_label = QLabel("Выберите кабинет и принтер для просмотра информации.")
-
-        left_layout.addWidget(QLabel("Кабинеты:"))
-        left_layout.addWidget(self.cabinet_list)
-        left_layout.addWidget(self.btn_add_cab)
-        left_layout.addWidget(self.btn_del_cab)
-        left_layout.addWidget(self.btn_storage)
-        left_layout.addWidget(self.btn_update)
-        if self.user_role == "admin":
-            left_layout.addWidget(self.btn_users)
-
-        right_layout.addWidget(QLabel("Принтеры выбранного кабинета:"))
-        right_layout.addWidget(self.printer_list)
-        right_layout.addWidget(self.btn_add_prn)
-        right_layout.addWidget(self.btn_del_prn)
-        right_layout.addWidget(self.btn_edit_prn)
-        right_layout.addWidget(self.btn_writeoff)
-        right_layout.addWidget(self.btn_history)
-        right_layout.addWidget(self.info_label)
-
-        main_layout.addLayout(left_layout, 1)
-        main_layout.addLayout(right_layout, 2)
-        self.setLayout(main_layout)
-        self.update_role_permissions()
-        self.load_cabinets()
-
-    def do_update(self):
-        autoupdate.check_and_update_gui(self)
-
-    def update_role_permissions(self):
-        if self.user_role == "admin":
-            pass
-        elif self.user_role == "operator":
-            self.btn_del_cab.setEnabled(False)
-            self.btn_users.setEnabled(False)
-        elif self.user_role == "viewer":
-            self.btn_add_cab.setEnabled(False)
-            self.btn_del_cab.setEnabled(False)
-            self.btn_add_prn.setEnabled(False)
-            self.btn_del_prn.setEnabled(False)
-            self.btn_edit_prn.setEnabled(False)
-            self.btn_writeoff.setEnabled(False)
-            self.btn_users.setEnabled(False)
-            self.btn_storage.setEnabled(False)
-            self.btn_update.setEnabled(False)
-
-    def db_conn(self):
-        return sqlite3.connect(DB_FILE)
-
-    def load_cabinets(self):
-        self.cabinet_list.clear()
-        conn = self.db_conn()
-        c = conn.cursor()
-        c.execute("SELECT id, name FROM cabinets ORDER BY name")
-        self.cabinets = c.fetchall()
-        for _id, name in self.cabinets:
-            self.cabinet_list.addItem(name)
-        conn.close()
-        self.printer_list.clear()
-        self.info_label.setText("Выберите кабинет и принтер для просмотра информации.")
-
-    def check_low_stock(self, printers=None):
-        if printers is None:
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute('''
-                SELECT cabinets.name, printers.name, cartridge_amount, min_cartridge_amount, drum_amount, min_drum_amount
-                FROM printers
-                LEFT JOIN cabinets ON printers.cabinet_id = cabinets.id
-            ''')
-            printers = c.fetchall()
-            conn.close()
-        messages = []
-        for cab, prn, cart_amt, min_cart, drum_amt, min_drum in printers:
-            if min_cart > 0 and cart_amt <= min_cart:
-                messages.append(f"ВНИМАНИЕ: В кабинете '{cab}' у принтера '{prn}' мало картриджей ({cart_amt} ≤ {min_cart})")
-            if min_drum > 0 and drum_amt <= min_drum:
-                messages.append(f"ВНИМАНИЕ: В кабинете '{cab}' у принтера '{prn}' мало драмов ({drum_amt} ≤ {min_drum})")
-        if messages:
-            QMessageBox.warning(self, "Низкий остаток", "\n".join(messages))
-
-    def on_cabinet_selected(self, idx):
-        self.printer_list.clear()
-        self.info_label.setText("Выберите принтер для просмотра информации.")
-        if idx < 0 or idx >= len(self.cabinets):
-            return
-        cabinet_id = self.cabinets[idx][0]
-        conn = self.db_conn()
-        c = conn.cursor()
-        c.execute("""
-            SELECT id, name, cartridge, drum, cartridge_amount, drum_amount, min_cartridge_amount, min_drum_amount
-            FROM printers WHERE cabinet_id=? ORDER BY name
-        """, (cabinet_id,))
-        self.printers = c.fetchall()
-        for _id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum in self.printers:
-            warning = False
-            tail = ""
-            if min_cart > 0 and cart_amt <= min_cart:
-                tail += " [Мало картриджей!]"
-                warning = True
-            if min_drum > 0 and drum_amt <= min_drum:
-                tail += " [Мало драмов!]"
-                warning = True
-            label = f"{name} | Картридж: {cartridge or '-'} ({cart_amt}), Драм: {drum or '-'} ({drum_amt}){tail}"
-            if warning:
-                label = "⚠️ " + label
-            item = QListWidgetItem(label)
-            if warning:
-                item.setBackground(QColor(255, 255, 128))
-            self.printer_list.addItem(item)
-        self.check_low_stock(
-            [(self.cabinets[idx][1], name, cart_amt, min_cart, drum_amt, min_drum)
-             for _id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum in self.printers]
-        )
-        conn.close()
-
-    def on_printer_selected(self, idx):
-        if idx < 0 or idx >= len(self.printers):
-            self.info_label.setText("Выберите принтер для просмотра информации.")
-            return
-        _id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum = self.printers[idx]
-        info = (
-            f"<b>Принтер:</b> {name}<br>"
-            f"<b>Картридж:</b> {cartridge or '-'}<br>"
-            f"<b>Количество картриджей:</b> {cart_amt} (мин. {min_cart})<br>"
-            f"<b>Драм:</b> {drum or '-'}<br>"
-            f"<b>Количество драмов:</b> {drum_amt} (мин. {min_drum})"
-        )
-        self.info_label.setText(info)
-
-    def add_cabinet(self):
-        name, ok = QInputDialog.getText(self, "Добавить кабинет", "Название кабинета:")
-        if ok and name:
-            try:
-                conn = self.db_conn()
-                c = conn.cursor()
-                c.execute("INSERT INTO cabinets (name) VALUES (?)", (name,))
-                conn.commit()
-                conn.close()
-                self.load_cabinets()
-            except sqlite3.IntegrityError:
-                QMessageBox.warning(self, "Ошибка", "Кабинет с таким названием уже существует!")
-
-    def delete_cabinet(self):
-        idx = self.cabinet_list.currentRow()
-        if idx < 0 or idx >= len(self.cabinets):
-            return
-        cabinet_id, name = self.cabinets[idx]
-        reply = QMessageBox.question(self, "Удалить кабинет",
-                                     f"Удалить кабинет '{name}' и все его принтеры?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute("DELETE FROM printers WHERE cabinet_id=?", (cabinet_id,))
-            c.execute("DELETE FROM cabinets WHERE id=?", (cabinet_id,))
-            conn.commit()
-            conn.close()
-            self.load_cabinets()
-
-    def add_printer(self):
-        cidx = self.cabinet_list.currentRow()
-        if cidx < 0 or cidx >= len(self.cabinets):
-            return
-        cabinet_id = self.cabinets[cidx][0]
-        dialog = PrinterEditDialog(parent=self)
-        if dialog.exec():
-            name, cartridge, cart_amt, drum, drum_amt, min_cart, min_drum = dialog.get_data()
-            if not name:
-                QMessageBox.warning(self, "Ошибка", "Название принтера не может быть пустым!")
-                return
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute("""
-                INSERT INTO printers (cabinet_id, name, cartridge, drum, cartridge_amount, drum_amount, min_cartridge_amount, min_drum_amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cabinet_id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum))
-            conn.commit()
-            conn.close()
-            self.on_cabinet_selected(cidx)
-
-    def delete_printer(self):
-        cidx = self.cabinet_list.currentRow()
-        pidx = self.printer_list.currentRow()
-        if pidx < 0 or pidx >= len(self.printers):
-            return
-        printer_id, name, *_ = self.printers[pidx]
-        reply = QMessageBox.question(self, "Удалить принтер",
-                                     f"Удалить принтер '{name}'?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute("DELETE FROM printers WHERE id=?", (printer_id,))
-            conn.commit()
-            conn.close()
-            self.on_cabinet_selected(cidx)
-
-    def edit_printer(self):
-        cidx = self.cabinet_list.currentRow()
-        pidx = self.printer_list.currentRow()
-        if pidx < 0 or pidx >= len(self.printers):
-            return
-        printer = self.printers[pidx]
-        (printer_id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum) = printer
-        dialog = PrinterEditDialog(
-            name=name,
-            cartridge=cartridge or "",
-            cartridge_amount=cart_amt,
-            drum=drum or "",
-            drum_amount=drum_amt,
-            min_cart_amt=min_cart,
-            min_drum_amt=min_drum,
-            parent=self
-        )
-        if dialog.exec():
-            new_name, new_cartridge, new_cart_amt, new_drum, new_drum_amt, new_min_cart, new_min_drum = dialog.get_data()
-            if not new_name:
-                QMessageBox.warning(self, "Ошибка", "Название принтера не может быть пустым!")
-                return
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute("""
-                UPDATE printers
-                SET name=?, cartridge=?, cartridge_amount=?, drum=?, drum_amount=?, min_cartridge_amount=?, min_drum_amount=?
-                WHERE id=?""",
-                (new_name, new_cartridge, new_cart_amt, new_drum, new_drum_amt, new_min_cart, new_min_drum, printer_id))
-            conn.commit()
-            conn.close()
-            self.on_cabinet_selected(cidx)
-
-    def writeoff_items(self):
-        cidx = self.cabinet_list.currentRow()
-        pidx = self.printer_list.currentRow()
-        if pidx < 0 or pidx >= len(self.printers):
-            return
-        printer = self.printers[pidx]
-        printer_id, name, cartridge, drum, cart_amt, drum_amt, min_cart, min_drum = printer
-        if cart_amt == 0 and drum_amt == 0:
-            QMessageBox.information(self, "Нет в наличии", "Нет картриджей и драмов на списание для этого принтера.")
-            return
-        dialog = WriteOffDialog(cart_amt, drum_amt, self)
-        if dialog.exec():
-            writeoff_cart, writeoff_drum = dialog.get_writeoff()
-            if writeoff_cart == 0 and writeoff_drum == 0:
-                return
-            if writeoff_cart > cart_amt or writeoff_drum > drum_amt:
-                QMessageBox.warning(self, "Ошибка", "Нельзя списать больше, чем есть в наличии.")
-                return
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            conn = self.db_conn()
-            c = conn.cursor()
-            c.execute("""
-                UPDATE printers
-                SET cartridge_amount=cartridge_amount-?, drum_amount=drum_amount-?
-                WHERE id=?""", (writeoff_cart, writeoff_drum, printer_id))
-            c.execute("""
-                INSERT INTO writeoff_history (printer_id, writeoff_cartridge, writeoff_drum, datetime, username)
-                VALUES (?, ?, ?, ?, ?)""",
-                (printer_id, writeoff_cart, writeoff_drum, now, self.username))
-            conn.commit()
-            conn.close()
-            self.on_cabinet_selected(cidx)
-            QMessageBox.information(self, "Списание", f"Списано:\nКартриджей: {writeoff_cart}\nДрамов: {writeoff_drum}")
-
-    def show_writeoff_history(self):
-        pidx = self.printer_list.currentRow()
-        if pidx < 0 or pidx >= len(self.printers):
-            QMessageBox.information(self, "История", "Выберите принтер.")
-            return
-        printer_id = self.printers[pidx][0]
-        dialog = WriteoffHistoryDialog(printer_id, self)
-        dialog.exec()
-
-    def manage_users(self):
-        dlg = UserManagementDialog(self)
-        dlg.exec()
-
-    def open_storage(self):
-        dlg = StorageDialog(self)
-        dlg.exec()
+            self.refresh_users()
 
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
-    # Авторизация
     login_ok = False
     user_role = None
     username = None
