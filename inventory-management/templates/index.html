@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <h1 class="mb-4">Главная панель</h1>
+    
+    <!-- Уведомления о низких остатках -->
+    {% if stats.low_stock_items > 0 %}
+    <div class="alert alert-warning alert-dismissible fade show" role="alert">
+        <i class="bi bi-exclamation-triangle"></i> 
+        <strong>Внимание!</strong> Обнаружено {{ stats.low_stock_items }} расходников с низким остатком.
+        <a href="{{ url_for('main.notifications') }}" class="alert-link">Просмотреть</a>
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+    
+    <!-- Статистика -->
+    <div class="row">
+        <div class="col-md-3 mb-4">
+            <div class="card text-white bg-primary">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-8">
+                            <h5 class="card-title">Кабинеты</h5>
+                            <h2 class="mb-0">{{ stats.rooms }}</h2>
+                        </div>
+                        <div class="col-4 text-end">
+                            <i class="bi bi-door-open" style="font-size: 3rem;"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="{{ url_for('main.rooms') }}" class="text-white text-decoration-none">
+                        Подробнее <i class="bi bi-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-3 mb-4">
+            <div class="card text-white bg-success">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-8">
+                            <h5 class="card-title">Принтеры</h5>
+                            <h2 class="mb-0">{{ stats.printers }}</h2>
+                        </div>
+                        <div class="col-4 text-end">
+                            <i class="bi bi-printer" style="font-size: 3rem;"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="{{ url_for('main.printers') }}" class="text-white text-decoration-none">
+                        Подробнее <i class="bi bi-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-3 mb-4">
+            <div class="card text-white bg-info">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-8">
+                            <h5 class="card-title">На складе</h5>
+                            <h2 class="mb-0">{{ stats.stock_available }}</h2>
+                        </div>
+                        <div class="col-4 text-end">
+                            <i class="bi bi-archive" style="font-size: 3rem;"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="{{ url_for('main.stock') }}" class="text-white text-decoration-none">
+                        Подробнее <i class="bi bi-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-3 mb-4">
+            <div class="card text-white bg-warning">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-8">
+                            <h5 class="card-title">Низкий остаток</h5>
+                            <h2 class="mb-0">{{ stats.low_stock_items }}</h2>
+                        </div>
+                        <div class="col-4 text-end">
+                            <i class="bi bi-exclamation-triangle" style="font-size: 3rem;"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="{{ url_for('main.notifications') }}" class="text-white text-decoration-none">
+                        Подробнее <i class="bi bi-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Последние движения -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Последние движения</h5>
+                </div>
+                <div class="card-body">
+                    {% if stats.recent_movements %}
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Дата</th>
+                                <th>Тип</th>
+                                <th>Расходник</th>
+                                <th>Пользователь</th>
+                                <th>Примечание</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for movement in stats.recent_movements %}
+                            <tr>
+                                <td>{{ movement.timestamp.strftime('%d.%m.%Y %H:%M') }}</td>
+                                <td>
+                                    {% if movement.type.value == 'receipt' %}
+                                        <span class="badge bg-success">Приход</span>
+                                    {% elif movement.type.value == 'install' %}
+                                        <span class="badge bg-primary">Установка</span>
+                                    {% elif movement.type.value == 'dispose' %}
+                                        <span class="badge bg-danger">Списание</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ movement.type.value }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>{{ movement.stock_item.supply.name }}</td>
+                                <td>{{ movement.responsible_user.username }}</td>
+                                <td>{{ movement.notes or '-' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    <a href="{{ url_for('main.movements') }}" class="btn btn-sm btn-primary">
+                        Все движения <i class="bi bi-arrow-right"></i>
+                    </a>
+                    {% else %}
+                    <p class="text-muted mb-0">Нет движений</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Быстрые действия -->
+    {% if current_user.is_operator() %}
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Быстрые действия</h5>
+                </div>
+                <div class="card-body">
+                    <a href="{{ url_for('main.stock_receipt') }}" class="btn btn-success me-2">
+                        <i class="bi bi-plus-circle"></i> Приход на склад
+                    </a>
+                    <a href="{{ url_for('main.new_printer') }}" class="btn btn-primary me-2">
+                        <i class="bi bi-printer"></i> Добавить принтер
+                    </a>
+                    <a href="{{ url_for('main.new_supply') }}" class="btn btn-info me-2">
+                        <i class="bi bi-box-seam"></i> Добавить расходник
+                    </a>
+                    {% if current_user.is_admin() %}
+                    <a href="{{ url_for('auth.register') }}" class="btn btn-secondary">
+                        <i class="bi bi-person-plus"></i> Добавить пользователя
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

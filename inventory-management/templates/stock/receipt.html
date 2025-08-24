@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row mb-4">
+        <div class="col">
+            <h1>Приход на склад</h1>
+        </div>
+        <div class="col-auto">
+            <a href="{{ url_for('main.stock') }}" class="btn btn-secondary">
+                <i class="bi bi-arrow-left"></i> Назад к складу
+            </a>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-body">
+            <form id="receipt-form">
+                <h5>Добавление расходников</h5>
+                <div id="items-container">
+                    <div class="item-row mb-3">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <select class="form-select supply-select" required>
+                                    <option value="">Выберите расходник...</option>
+                                    {% for supply in supplies %}
+                                    <option value="{{ supply.id }}">
+                                        {{ supply.code }} - {{ supply.name }}
+                                        {% if supply.color %}({{ supply.color }}){% endif %}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <input type="text" class="form-control serial-number" placeholder="Серийный номер (опционально)">
+                            </div>
+                            <div class="col-md-3">
+                                <input type="text" class="form-control notes" placeholder="Примечание (опционально)">
+                            </div>
+                            <div class="col-md-2">
+                                <button type="button" class="btn btn-danger remove-item" style="display: none;">
+                                    <i class="bi bi-trash"></i> Удалить
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <button type="button" class="btn btn-success" id="add-item">
+                    <i class="bi bi-plus-circle"></i> Добавить еще
+                </button>
+                
+                <hr>
+                
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-check-circle"></i> Оформить приход
+                </button>
+                <button type="reset" class="btn btn-secondary">
+                    <i class="bi bi-x-circle"></i> Очистить
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    // Добавление новой строки
+    $('#add-item').click(function() {
+        const newRow = $('.item-row').first().clone();
+        newRow.find('input').val('');
+        newRow.find('select').val('');
+        newRow.find('.remove-item').show();
+        $('#items-container').append(newRow);
+    });
+    
+    // Удаление строки
+    $(document).on('click', '.remove-item', function() {
+        $(this).closest('.item-row').remove();
+    });
+    
+    // Отправка формы
+    $('#receipt-form').submit(function(e) {
+        e.preventDefault();
+        
+        const items = [];
+        $('.item-row').each(function() {
+            const supplyId = $(this).find('.supply-select').val();
+            if (supplyId) {
+                items.push({
+                    supply_id: parseInt(supplyId),
+                    serial_number: $(this).find('.serial-number').val() || null,
+                    notes: $(this).find('.notes').val() || null
+                });
+            }
+        });
+        
+        if (items.length === 0) {
+            alert('Добавьте хотя бы один расходник');
+            return;
+        }
+        
+        $.ajax({
+            url: '/api/stock/receipt',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ items: items }),
+            success: function(response) {
+                alert(response.message);
+                window.location.href = "{{ url_for('main.stock') }}";
+            },
+            error: function(xhr) {
+                alert('Ошибка при добавлении');
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

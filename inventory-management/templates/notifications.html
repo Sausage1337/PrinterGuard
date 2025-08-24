@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <h1 class="mb-4">Уведомления</h1>
+    
+    {% if low_stock_supplies %}
+    <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle"></i> 
+        Обнаружено <strong>{{ low_stock_supplies|length }}</strong> расходников с низким остатком
+    </div>
+    
+    <div class="row">
+        {% for supply in low_stock_supplies %}
+        <div class="col-md-6 col-lg-4 mb-4">
+            <div class="card {% if supply.get_current_stock() == 0 %}border-danger{% else %}border-warning{% endif %}">
+                <div class="card-header {% if supply.get_current_stock() == 0 %}bg-danger text-white{% else %}bg-warning{% endif %}">
+                    <h5 class="mb-0">
+                        {% if supply.get_current_stock() == 0 %}
+                        <i class="bi bi-x-circle"></i> Критически низкий остаток
+                        {% else %}
+                        <i class="bi bi-exclamation-triangle"></i> Низкий остаток
+                        {% endif %}
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="card-title">{{ supply.name }}</h6>
+                    <p class="card-text">
+                        <strong>Код:</strong> {{ supply.code }}<br>
+                        <strong>Тип:</strong> {{ supply.type.value }}<br>
+                        {% if supply.color %}
+                        <strong>Цвет:</strong> {{ supply.color }}<br>
+                        {% endif %}
+                        <strong>На складе:</strong> 
+                        <span class="badge {% if supply.get_current_stock() == 0 %}bg-danger{% else %}bg-warning{% endif %}">
+                            {{ supply.get_current_stock() }}
+                        </span><br>
+                        <strong>Минимальный остаток:</strong> {{ supply.min_stock }}
+                    </p>
+                    {% if current_user.is_operator() %}
+                    <a href="{{ url_for('main.stock_receipt') }}" class="btn btn-sm btn-success">
+                        <i class="bi bi-plus-circle"></i> Заказать
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="alert alert-success">
+        <i class="bi bi-check-circle"></i> 
+        Все расходники в достаточном количестве
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
