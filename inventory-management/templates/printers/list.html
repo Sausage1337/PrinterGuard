@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row mb-4">
+        <div class="col">
+            <h1>Принтеры</h1>
+        </div>
+        <div class="col-auto">
+            {% if current_user.is_operator() %}
+            <a href="{{ url_for('main.new_printer') }}" class="btn btn-primary">
+                <i class="bi bi-plus-circle"></i> Добавить принтер
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-body">
+            <table class="table table-hover" id="printers-table">
+                <thead>
+                    <tr>
+                        <th>Инв. номер</th>
+                        <th>Модель</th>
+                        <th>Кабинет</th>
+                        <th>IP-адрес</th>
+                        <th>Статус</th>
+                        <th>Расходники</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for printer in printers %}
+                    <tr>
+                        <td>{{ printer.inventory_number }}</td>
+                        <td>{{ printer.printer_model.manufacturer }} {{ printer.printer_model.model }}</td>
+                        <td>{{ printer.room.number }} {% if printer.room.name %}({{ printer.room.name }}){% endif %}</td>
+                        <td>{{ printer.ip_address or '-' }}</td>
+                        <td>
+                            {% if printer.status == 'active' %}
+                                <span class="badge bg-success">Активен</span>
+                            {% elif printer.status == 'repair' %}
+                                <span class="badge bg-warning">Ремонт</span>
+                            {% elif printer.status == 'decommissioned' %}
+                                <span class="badge bg-danger">Списан</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if printer.current_supplies.count() > 0 %}
+                                <span class="badge bg-info">{{ printer.current_supplies.count() }}</span>
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <a href="{{ url_for('main.printer_detail', id=printer.id) }}" class="btn btn-sm btn-outline-primary">
+                                <i class="bi bi-eye"></i> Просмотр
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    // Можно добавить DataTable для сортировки и поиска
+});
+</script>
+{% endblock %}

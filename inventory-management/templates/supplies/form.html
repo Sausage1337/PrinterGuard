@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h4 class="mb-0">Новый расходник</h4>
+                </div>
+                <div class="card-body">
+                    <form id="supply-form">
+                        <div class="mb-3">
+                            <label for="code" class="form-label">Код</label>
+                            <input type="text" class="form-control" id="code" required>
+                            <div class="form-text">Уникальный код расходника (например: CE285A)</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="name" class="form-label">Название</label>
+                            <input type="text" class="form-control" id="name" required>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="type" class="form-label">Тип</label>
+                            <select class="form-select" id="type" required>
+                                <option value="">Выберите тип...</option>
+                                {% for type_value, type_name in supply_types %}
+                                <option value="{{ type_value }}">{{ type_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="color" class="form-label">Цвет (опционально)</label>
+                            <select class="form-select" id="color">
+                                <option value="">Не указан</option>
+                                <option value="black">Черный</option>
+                                <option value="cyan">Голубой</option>
+                                <option value="magenta">Пурпурный</option>
+                                <option value="yellow">Желтый</option>
+                            </select>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="min_stock" class="form-label">Минимальный остаток</label>
+                            <input type="number" class="form-control" id="min_stock" value="5" min="0" required>
+                            <div class="form-text">При достижении этого количества будет показано уведомление</div>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-check-circle"></i> Сохранить
+                        </button>
+                        <a href="{{ url_for('main.supplies') }}" class="btn btn-secondary">
+                            <i class="bi bi-x-circle"></i> Отмена
+                        </a>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$('#supply-form').on('submit', function(e) {
+    e.preventDefault();
+    
+    const data = {
+        code: $('#code').val(),
+        name: $('#name').val(),
+        type: $('#type').val(),
+        color: $('#color').val() || null,
+        min_stock: parseInt($('#min_stock').val())
+    };
+    
+    $.ajax({
+        url: '/api/supplies',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(data),
+        success: function(response) {
+            showAlert('Расходник успешно добавлен', 'success');
+            window.location.href = "{{ url_for('main.supplies') }}";
+        },
+        error: function(xhr) {
+            showAlert('Ошибка при добавлении расходника', 'danger');
+        }
+    });
+});
+</script>
+{% endblock %}
